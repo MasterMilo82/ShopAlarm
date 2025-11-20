@@ -26,7 +26,7 @@ let alarmSettings = {
         '4': { onTimeMs: 5000, delayMs: 3000 },
     },
     // State to be sent to ESP32 on its next poll
-    activeTrigger: null, // { source: 'order'|'test', timestamp: ms, relayStates: {1:true, 2:false,...} }
+    activeTrigger: null, // { source: 'order'|'test', webhookTimestamp: ms, triggerStartTime: ms | null, relayConfig: {...} }
     testRelay: {
         id: null, // Relay ID being tested (1-4)
         onTimeMs: 500 // Test duration
@@ -168,12 +168,13 @@ app.post('/webhook/order', (req, res) => {
     if (alarmSettings.alarmEnabled) {
         alarmSettings.activeTrigger = {
             source: 'order',
-            timestamp: Date.now(),
+            webhookTimestamp: Date.now(), // Store when webhook was received
+            triggerStartTime: null,       // Will be set on first ESP32 poll
             relayConfig: alarmSettings.relays
         };
         saveSettings(); // Save state
-        console.log('Alarm trigger activated for Order event.');
-        res.status(200).send('Alarm triggered via API.');
+        console.log('Alarm trigger activated for Order event, awaiting ESP32 poll.');
+        res.status(200).send('Alarm triggered via API (awaiting ESP32 poll).');
     } else {
         console.log('Alarm is disabled, not triggering for Order event.');
         res.status(200).send('Alarm is disabled, trigger ignored.');
@@ -205,24 +206,28 @@ app.get('/api/data', (req, res) => {
     }
 
     if (alarmSettings.activeTrigger) {
+        // If triggerStartTime is not set, this is the first poll for this trigger
+        if (alarmSettings.activeTrigger.triggerStartTime === null) {
+            alarmSettings.activeTrigger.triggerStartTime = now;
+            saveSettings(); // Persist the new triggerStartTime
+            console.log('First ESP32 poll for active trigger. Setting triggerStartTime:', now);
+        }
+
         isActive = true; // Indicates there's an ongoing trigger
+        const startTime = alarmSettings.activeTrigger.triggerStartTime;
+        let allRelaysFinished = true; // Assume true, will set to false if any relay is still active
 
         for (const relayId in alarmSettings.activeTrigger.relayConfig) {
             const config = alarmSettings.activeTrigger.relayConfig[relayId];
-            const elapsed = now - alarmSettings.activeTrigger.timestamp;
+            const elapsed = now - startTime;
 
             if (elapsed >= config.delayMs && elapsed < (config.delayMs + config.onTimeMs)) {
                 relayStates[relayId] = true; // Relay should be ON
+                allRelaysFinished = false; // At least one relay is still active
             } else {
                 relayStates[relayId] = false; // Relay should be OFF
             }
         }
-
-        // Check if all relays have completed their onTime
-        const allRelaysFinished = Object.keys(alarmSettings.activeTrigger.relayConfig).every(relayId => {
-            const config = alarmSettings.activeTrigger.relayConfig[relayId];
-            return now >= (alarmSettings.activeTrigger.timestamp + config.delayMs + config.onTimeMs);
-        });
 
         if (allRelaysFinished) {
             isActive = false;
