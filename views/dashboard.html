@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shopware Alarm Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" type="text/css" href="./style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Shopware Alarm Control</h1>
+
+    <p class="status-message" id="status-message"></p>
+
+    <div class="setting-group checkbox-group">
+        <input type="checkbox" id="alarm-enabled">
+        <label for="alarm-enabled">Enable Main Alarm System</label>
+    </div>
+
+    <div id="relays-container">
+        <!-- Relay settings will be injected here by JavaScript -->
+    </div>
+
+    <button id="save-button" class="btn primary">Save All Settings</button>
+    <button id="deactivate-button" class="btn danger">Deactivate All Active Alarms</button>
+
+    <p class="logout-link"><a href="/logout">Logout</a></p>
+</div>
+
+<script src="./script.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "alarmEnabled": true,
+  "relays": {
+    "1": {
+      "onTimeMs": 4000,
+      "delayMs": 0
+    },
+    "2": {
+      "onTimeMs": 3000,
+      "delayMs": 0
+    },
+    "3": {
+      "onTimeMs": 2000,
+      "delayMs": 0
+    },
+    "4": {
+      "onTimeMs": 1000,
+      "delayMs": 0
+    }
+  },
+  "activeTrigger": null,
+  "testRelay": {
+    "id": null,
+    "onTimeMs": 0
+  },
+  "relayOnTimeMs": 1000
+}
