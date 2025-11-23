@@ -5,7 +5,7 @@ const bodyParser = require('body-parser');
 const session = require('express-session');
 const fs = require('fs');
 const path = require('path');
-const WebSocket = require('ws'); // <-- New: WebSocket library
+const WebSocket = require('ws');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,16 +22,18 @@ const USERS_FILE = path.join(__dirname, 'data', 'users.json'); // User credentia
 let alarmSettings = {
     alarmEnabled: true,
     relays: {
-        '1': { onTimeMs: 5000, delayMs: 0 },
-        '2': { onTimeMs: 5000, delayMs: 1000 },
-        '3': { onTimeMs: 5000, delayMs: 2000 },
-        '4': { onTimeMs: 5000, delayMs: 3000 },
+        '1': { onTimeMs: 5000, delayMs: 0, pulseMs: 0, enabled: true },   // Added enabled
+        '2': { onTimeMs: 5000, delayMs: 1000, pulseMs: 0, enabled: true }, // Added enabled
+        '3': { onTimeMs: 5000, delayMs: 2000, pulseMs: 0, enabled: true }, // Added enabled
+        '4': { onTimeMs: 5000, delayMs: 3000, pulseMs: 0, enabled: true }, // Added enabled
     },
     // State to be sent to ESP32 via WebSocket
-    activeTrigger: null, // { source: 'order'|'test', timestamp: ms, relayConfig: {1:true, 2:false,...} }
+    activeTrigger: null, // { source: 'order'|'test', timestamp: ms, relayConfig: {1:{onTimeMs, delayMs, pulseMs, enabled}, ...} }
     testRelay: {
         id: null, // Relay ID being tested (1-4)
-        onTimeMs: 0 // Test duration
+        onTimeMs: 0, // Test duration
+        pulseMs: 0,   // Test pulse duration
+        timestamp: 0 // Timestamp when test started
     },
     // Current relay states derived from activeTrigger (for ESP32)
     currentRelayStates: { '1': false, '2': false, '3': false, '4': false },
@@ -55,26 +57,53 @@ function calculateAndBroadcastRelayStates() {
     let updatedRelayStates = { '1': false, '2': false, '3': false, '4': false };
     let newTriggerActive = false;
 
-    if (alarmSettings.activeTrigger) {
+    // Handle the main active trigger
+    if (alarmSettings.alarmEnabled && alarmSettings.activeTrigger) { // Added alarmSettings.alarmEnabled check
         newTriggerActive = true;
+
+        let allRelaysFinished = true; // Assume all finished until proven otherwise
 
         for (const relayId in alarmSettings.activeTrigger.relayConfig) {
             const config = alarmSettings.activeTrigger.relayConfig[relayId];
-            const elapsed = now - alarmSettings.activeTrigger.timestamp;
 
-            if (elapsed >= config.delayMs && elapsed < (config.delayMs + config.onTimeMs)) {
-                updatedRelayStates[relayId] = true; // Relay should be ON
+            // Only process relays that are individually enabled
+            if (!config.enabled) {
+                updatedRelayStates[relayId] = false;
+                continue; // Skip disabled relays
+            }
+
+            const elapsed = now - alarmSettings.activeTrigger.timestamp;
+            const effectiveEndTime = config.delayMs + config.onTimeMs;
+
+            if (elapsed >= config.delayMs && elapsed < effectiveEndTime) {
+                // Relay is within its active window
+                if (config.pulseMs > 0) {
+                    // Pulse mode is active
+                    const pulseCycleTime = config.pulseMs * 2; // on + off duration
+                    const timeInWindow = elapsed - config.delayMs;
+                    if (timeInWindow % pulseCycleTime < config.pulseMs) {
+                        updatedRelayStates[relayId] = true; // Pulse ON
+                    } else {
+                        updatedRelayStates[relayId] = false; // Pulse OFF
+                    }
+                } else {
+                    // Solid ON mode
+                    updatedRelayStates[relayId] = true;
+                }
+                allRelaysFinished = false; // At least one enabled relay is still active
             } else {
-                updatedRelayStates[relayId] = false; // Relay should be OFF
+                updatedRelayStates[relayId] = false; // Relay should be OFF (either not started or finished)
             }
         }
 
-        const allRelaysFinished = Object.keys(alarmSettings.activeTrigger.relayConfig).every(relayId => {
+        // Check if all *enabled* relays that were part of the trigger have finished
+        const allEnabledTriggerRelaysFinished = Object.keys(alarmSettings.activeTrigger.relayConfig).every(relayId => {
             const config = alarmSettings.activeTrigger.relayConfig[relayId];
+            if (!config.enabled) return true; // Disabled relays are considered "finished" immediately
             return now >= (alarmSettings.activeTrigger.timestamp + config.delayMs + config.onTimeMs);
         });
 
-        if (allRelaysFinished) {
+        if (allEnabledTriggerRelaysFinished) {
             newTriggerActive = false;
             updatedRelayStates = { '1': false, '2': false, '3': false, '4': false }; // Ensure all are off
             alarmSettings.activeTrigger = null; // Clear the trigger
@@ -82,18 +111,54 @@ function calculateAndBroadcastRelayStates() {
         }
     }
 
+    // Handle test relay commands, which override activeTrigger for that specific relay
+    // A test relay always implies a triggerActive state for its duration
+    if (alarmSettings.testRelay.id !== null && alarmSettings.testRelay.onTimeMs > 0) {
+        const testRelayId = String(alarmSettings.testRelay.id);
+        const testStartTime = alarmSettings.testRelay.timestamp;
+        const elapsedTest = now - testStartTime;
+        const testEndTime = alarmSettings.testRelay.onTimeMs;
+        const testPulseMs = alarmSettings.testRelay.pulseMs;
+
+        if (elapsedTest < testEndTime) {
+            if (testPulseMs > 0) {
+                const pulseCycleTime = testPulseMs * 2;
+                if (elapsedTest % pulseCycleTime < testPulseMs) {
+                    updatedRelayStates[testRelayId] = true; // Pulse ON for test
+                } else {
+                    updatedRelayStates[testRelayId] = false; // Pulse OFF for test
+                }
+            } else {
+                updatedRelayStates[testRelayId] = true; // Solid ON for test
+            }
+            newTriggerActive = true; // Test relay implies an "active" state
+        } else {
+            // Test relay finished
+            alarmSettings.testRelay = { id: null, onTimeMs: 0, pulseMs: 0, timestamp: 0 };
+            // Clear the specific relay's state to off if it was just testing and no other trigger is active
+            if (!alarmSettings.activeTrigger) { // Check if main trigger is also inactive
+                updatedRelayStates[testRelayId] = false;
+            }
+            saveSettings(); // Persist the cleared test state
+        }
+    }
+
+
     // Check if states have actually changed before broadcasting
     const relayStatesChanged = JSON.stringify(updatedRelayStates) !== JSON.stringify(alarmSettings.currentRelayStates);
     const triggerActiveChanged = newTriggerActive !== alarmSettings.triggerActive;
 
-    if (relayStatesChanged || triggerActiveChanged || alarmSettings.testRelay.id !== null) {
+    if (relayStatesChanged || triggerActiveChanged || (alarmSettings.testRelay.id !== null && alarmSettings.testRelay.onTimeMs > 0)) {
         alarmSettings.currentRelayStates = updatedRelayStates;
         alarmSettings.triggerActive = newTriggerActive;
-        saveSettings(); // Save current state (activeTrigger might have been cleared)
+        // Save settings if activeTrigger was cleared or a testRelay finished
+        if (!alarmSettings.activeTrigger && !newTriggerActive && !alarmSettings.testRelay.id) {
+            saveSettings(); // Only save if system becomes completely idle
+        }
         broadcastSettings(); // Broadcast the updated state
     }
 
-    // If no active trigger and no test relay, we can stop the interval
+    // Manage the interval: start if needed, stop if idle
     if (!alarmSettings.activeTrigger && alarmSettings.testRelay.id === null && intervalId) {
         clearInterval(intervalId);
         intervalId = null;
@@ -121,11 +186,8 @@ function broadcastSettings() {
         }
     });
 
-    // Clear testRelay after sending it once
-    if (alarmSettings.testRelay.id !== null) {
-        alarmSettings.testRelay = { id: null, onTimeMs: 0 };
-        saveSettings(); // Persist the cleared test state
-    }
+    // We no longer clear testRelay immediately here. It's now handled by calculateAndBroadcastRelayStates
+    // based on its internal timer.
 }
 
 
@@ -136,7 +198,23 @@ function loadSettings() {
             const data = fs.readFileSync(SETTINGS_FILE, 'utf8');
             const loaded = JSON.parse(data);
             // Merge loaded settings to preserve new properties from code changes
+            // Ensure pulseMs and enabled are present, defaulting if not in loaded file
+            for (const key in alarmSettings.relays) {
+                if (loaded.relays && loaded.relays[key]) {
+                    loaded.relays[key].pulseMs = loaded.relays[key].pulseMs !== undefined ? loaded.relays[key].pulseMs : 0;
+                    loaded.relays[key].enabled = loaded.relays[key].enabled !== undefined ? loaded.relays[key].enabled : true; // Default to true
+                }
+            }
             alarmSettings = { ...alarmSettings, ...loaded };
+
+            // Ensure testRelay structure is consistent (especially pulseMs, timestamp)
+            alarmSettings.testRelay = {
+                id: alarmSettings.testRelay.id || null,
+                onTimeMs: alarmSettings.testRelay.onTimeMs || 0,
+                pulseMs: alarmSettings.testRelay.pulseMs !== undefined ? alarmSettings.testRelay.pulseMs : 0,
+                timestamp: alarmSettings.testRelay.timestamp || 0
+            };
+
             console.log('Settings loaded:', alarmSettings);
         } catch (error) {
             console.error('Error loading settings file:', error);
@@ -257,23 +335,23 @@ app.post('/webhook/order', (req, res) => {
 
     console.log('Order webhook received!');
 
+    // The main alarmEnabled toggle now controls whether any relay is triggered by an order
     if (alarmSettings.alarmEnabled) {
+        // Use the currently configured relay settings (including 'enabled' property)
         alarmSettings.activeTrigger = {
             source: 'order',
             timestamp: Date.now(),
-            relayConfig: alarmSettings.relays
+            relayConfig: JSON.parse(JSON.stringify(alarmSettings.relays)) // Deep copy of current configs
         };
         // Trigger calculation and broadcast immediately
         calculateAndBroadcastRelayStates();
         console.log('Alarm trigger activated for Order event.');
         res.status(200).send('Alarm triggered via API.');
     } else {
-        console.log('Alarm is disabled, not triggering for Order event.');
-        res.status(200).send('Alarm is disabled, trigger ignored.');
+        console.log('Main alarm is disabled, not triggering for Order event.');
+        res.status(200).send('Main alarm is disabled, trigger ignored.');
     }
 });
-
-// Removed: /api/data endpoint, as ESP32 will use WebSockets
 
 // Get dashboard settings (for initial load)
 app.get('/api/dashboard/settings', isAuthenticated, (req, res) => {
@@ -304,6 +382,14 @@ app.post('/api/dashboard/settings', isAuthenticated, (req, res) => {
         if (typeof relay.delayMs !== 'number' || relay.delayMs < 0 || relay.delayMs > 600000) { // 0ms to 10 min
             return res.status(400).send(`Invalid delayMs for relay ${id}.`);
         }
+        // Validation for pulseMs
+        if (typeof relay.pulseMs !== 'number' || relay.pulseMs < 0 || relay.pulseMs > 5000) { // 0ms to 5 seconds
+            return res.status(400).send(`Invalid pulseMs for relay ${id}. Must be between 0 and 5000.`);
+        }
+        // New validation for enabled
+        if (typeof relay.enabled !== 'boolean') {
+            return res.status(400).send(`Invalid enabled status for relay ${id}.`);
+        }
     }
 
     alarmSettings.alarmEnabled = alarmEnabled;
@@ -325,13 +411,21 @@ app.post('/api/dashboard/commands/test-relay/:id', isAuthenticated, (req, res) =
         return res.status(400).send('Invalid relay ID.');
     }
 
+    const currentRelayConfig = alarmSettings.relays[relayId];
+
+    // Check if the individual relay is enabled before testing
+    if (!currentRelayConfig.enabled) {
+        return res.status(400).send(`Relay ${relayId} is disabled and cannot be tested.`);
+    }
+
     // Set the test command for the ESP32 to pick up
+    // Use the configured pulseMs for the test relay
     alarmSettings.testRelay = {
         id: parseInt(relayId, 10),
-        onTimeMs: 500 // Fixed 500ms test duration
+        onTimeMs: 500, // Fixed 500ms test duration
+        pulseMs: currentRelayConfig.pulseMs, // Use configured pulse for test
+        timestamp: Date.now() // Start test now
     };
-    // No need to saveSettings here, broadcastSettings will clear it immediately
-    // and calculateAndBroadcastRelayStates will save if other things change.
     calculateAndBroadcastRelayStates(); // Broadcast the updated state with testRelay command
 
     console.log(`Test command sent for relay ${relayId}.`);
@@ -342,7 +436,7 @@ app.post('/api/dashboard/commands/test-relay/:id', isAuthenticated, (req, res) =
 app.post('/api/dashboard/commands/deactivate-alarm', isAuthenticated, (req, res) => {
     if (alarmSettings.activeTrigger || alarmSettings.testRelay.id !== null || alarmSettings.triggerActive) {
         alarmSettings.activeTrigger = null;
-        alarmSettings.testRelay = { id: null, onTimeMs: 0 }; // Clear any test
+        alarmSettings.testRelay = { id: null, onTimeMs: 0, pulseMs: 0, timestamp: 0 }; // Clear any test
         // Trigger calculation and broadcast to update state and clear interval if needed
         calculateAndBroadcastRelayStates();
         console.log('Deactivate alarm command issued from dashboard. Active trigger cleared.');

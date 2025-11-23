@@ -209,3 +209,20 @@ button:disabled, .action-button:disabled {
 #login-form button {
     margin-top: 30px;
 }
+
+/* Add this to your style.css */
+.setting-group.pulse-group {
+    display: flex;
+    align-items: center;
+    gap: 10px; /* Space between label, input, and unit */
+    margin-top: 5px; /* Add some space above this group */
+}
+
+.setting-group.pulse-group label {
+    flex-shrink: 0; /* Prevent label from shrinking */
+    width: 120px; /* Give label a fixed width */
+}
+
+.setting-group.pulse-group input[type="number"] {
+    width: 80px; /* Adjust input width */
+}

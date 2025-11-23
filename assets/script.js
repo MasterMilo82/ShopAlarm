@@ -17,12 +17,18 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderRelaySettings(settings) {
         relaysContainer.innerHTML = ''; // Clear previous
         for (let i = 1; i <= 4; i++) {
-            const relay = settings.relays[i] || { onTimeMs: 5000, delayMs: 0 }; // Default if not found
+            // Default if not found or new properties
+            // Added 'enabled' property, defaulting to true
+            const relay = settings.relays[i] || { onTimeMs: 5000, delayMs: 0, pulseMs: 0, enabled: true };
 
             const relayCard = document.createElement('div');
             relayCard.className = 'relay-card';
             relayCard.innerHTML = `
                 <h2>Relay ${i}</h2>
+                <div class="setting-group checkbox-group">
+                    <input type="checkbox" id="relay-${i}-enabled" data-relay-id="${i}" data-setting="enabled" ${relay.enabled ? 'checked' : ''}>
+                    <label for="relay-${i}-enabled">Enable Relay ${i}</label>
+                </div>
                 <div class="setting-group">
                     <label for="relay-${i}-on-time">On Duration (ms):</label>
                     <input type="number" id="relay-${i}-on-time" data-relay-id="${i}" data-setting="onTimeMs" min="100" max="600000" value="${relay.onTimeMs}">
@@ -30,6 +36,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="setting-group">
                     <label for="relay-${i}-delay-time">Delay Before On (ms):</label>
                     <input type="number" id="relay-${i}-delay-time" data-relay-id="${i}" data-setting="delayMs" min="0" max="600000" value="${relay.delayMs}">
+                </div>
+                <div class="setting-group pulse-group">
+                    <label for="relay-${i}-pulse-ms">Pulse Frequency (ms):</label>
+                    <input type="number" id="relay-${i}-pulse-ms" data-relay-id="${i}" data-setting="pulseMs" min="0" max="5000" value="${relay.pulseMs}">
+                    <span>(0 for off)</span>
                 </div>
                 <button class="btn secondary test-button" data-relay-id="${i}">Test Relay ${i} (500ms)</button>
             `;
@@ -63,9 +74,14 @@ document.addEventListener('DOMContentLoaded', () => {
             for (let i = 1; i <= 4; i++) {
                 const onTimeInput = document.getElementById(`relay-${i}-on-time`);
                 const delayTimeInput = document.getElementById(`relay-${i}-delay-time`);
+                const pulseMsInput = document.getElementById(`relay-${i}-pulse-ms`);
+                const enabledCheckbox = document.getElementById(`relay-${i}-enabled`); // New
+
                 updatedRelays[i] = {
                     onTimeMs: parseInt(onTimeInput.value, 10),
-                    delayMs: parseInt(delayTimeInput.value, 10)
+                    delayMs: parseInt(delayTimeInput.value, 10),
+                    pulseMs: parseInt(pulseMsInput.value, 10),
+                    enabled: enabledCheckbox.checked // New
                 };
             }
 
@@ -93,6 +109,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function testRelay(relayId) {
         try {
+            // Check if the individual relay is enabled before testing
+            const enabledCheckbox = document.getElementById(`relay-${relayId}-enabled`);
+            if (!enabledCheckbox.checked) {
+                showStatus(`Relay ${relayId} is disabled and cannot be tested. Please enable it first.`, true);
+                return;
+            }
+
             const response = await fetch(`/api/dashboard/commands/test-relay/${relayId}`, { method: 'POST' });
             if (!response.ok) {
                 const errorText = await response.text();
